@@ -1,0 +1,313 @@
+setwd("~/R Class Final Project")
+
+#------------LIBRARIES--------#
+library(plyr)
+library(stringr)
+library(grid)
+library(gridExtra)
+library(ggplot2)
+library(ggmap)
+
+
+#----------ACQUIRE---------#
+
+#Pulling in main data
+df<-read.csv("WebExtract.txt", sep=",",strip.white=TRUE)
+
+#Pulling in the cuisine codes and their description
+cuisine<-read.table("Cuisine.txt", colClasses=c("character","character"),sep=',',header=TRUE)  
+
+#Creating borough dataframe 
+BORO <- c(1:5)
+BORODESC <- c('MANHATTAN','BRONX','BROOKLYN','QUEENS','STATEN ISLAND')
+BORODF <- data.frame(BORO,BORODESC)
+
+#-------------CLEAN-----------#
+
+#Taking out the only columns I need to make things move faster
+df1<-df[,c(1:6,8,11:13)]
+
+#Removing any duplicates based on the unique identifier 
+df2<- subset(df1,!duplicated(df1$CAMIS))
+
+#Removing any rows with 0 in the boro
+df2$BORO[df2$BORO==0]<-NA
+df3 <- na.omit(df2)
+
+#Using plyr to join the df's
+#Joining cuisine to df2 by CUISINECODE
+dfc<-join(df3,cuisine, type="left")
+
+#Joining boro description by BORO
+dfcb<-join(dfc,BORODF, type="left")
+
+#Reorder the columns
+df_clean <- dfcb[c(1:3,12,4:7,11,8:10)]
+
+#Trim whitespace and concatenate address for geocoder
+df_clean$STREET<- str_trim(df_clean$STREET)
+df_clean$BUILDING <- str_trim(df_clean$BUILDING)
+df_clean$ZIPCODE <-str_trim(df_clean$ZIPCODE)
+address <-data.frame(paste(df_clean$BUILDING, df_clean$STREET, "," , "New York" , "," , "NY",df_clean$ZIPCODE))
+#Renaming the column
+names(address)<-"FULLADDRESS"
+#Add new column to the end of df_clean
+df_clean<- cbind(df_clean, address)
+
+#Reorder the columns
+df_clean <- df_clean[c(1:7,13,8:12)]
+
+#remove Staten Island as it won't map well
+df_clean <- df_clean[df_clean[,3]!='5',]
+head(df_clean[,1])
+
+
+#Prep for Geocoding
+df_g<- df_clean$FULLADDRESS     #<----using this to cut up the data so my computer won't crash
+df_g<-df_g[10001:11000]
+dff<-data.frame(df_g)
+names(dff)<-"address"
+head(dff)
+
+#----------------- GEOCODING FUNCTION -------------------#
+
+geo.dsk <- function(addr){ # single address geocode with data sciences toolkit
+  require(httr)
+  require(rjson)
+  url      <- "http://www.datasciencetoolkit.org/maps/api/geocode/json"
+  response <- GET(url,query=list(sensor="FALSE",address=addr))
+  json <- fromJSON(content(response,type="text"))
+  loc  <- json['results'][[1]][[1]]$geometry$location
+  return(c(address=addr,long=loc$lng, lat= loc$lat))
+}
+#--------------------------------------------------------#
+
+#Calls the function
+result10 <- do.call(rbind,lapply(as.character(dff$address),geo.dsk))
+result10 <- data.frame(result10)
+write.csv(result10, file = '10001-11kgeo.csv')
+
+#FOUND OUT DURING GEOCODING THAT FROM 11465 to 11500 were all screwy as well as everything from 15825 onwards.  Had to remove them.
+df_clean1<- df_clean[1:11464,]
+df_clean2<- df_clean[11501:15825,]
+ndf_clean<- rbind(df_clean1,df_clean2)
+
+#LOADING THE SAVE CODE IN CASE EVERYTHING CRASHES
+geo1<-read.csv("1-5kgeo.csv", header = TRUE, sep=',')
+geo2<-read.csv("5001-10kgeo.csv", header = TRUE, sep=',')
+geo3<-read.csv("10001-11kgeo.csv", header = TRUE, sep=',')
+geo4<-read.csv("11001-11464geo.csv", header = TRUE, sep=',')
+geo5<-read.csv("11501-12kgeo.csv", header = TRUE, sep=',')
+geo6<-read.csv("12001-14kgeo.csv", header = TRUE, sep=',')
+geo7<-read.csv("14001-endgeo.csv", header = TRUE, sep=',')
+
+#Combining all the geocode and renaming the columns
+geoall<-rbind(geo1,geo2,geo3,geo4,geo5,geo6,geo7)
+names(geoall)<-c("index","address","lon","lat")
+head(geoall)
+geoall$index <- NULL
+head(geoall)
+
+#Binding the data frames together and checking against FULLADDRESS
+finaldf<-cbind(ndf_clean,geoall)
+finaldf$address<-NULL
+write.csv(finaldf, file='finaldf.csv')
+head(finaldf)
+
+#Start from here for the clean dataset
+read.csv('finaldf.csv', sep = ",")
+
+#-----------------BASIC DATA EXPLORATION------------#
+
+#Counts of Restaurants in the city
+#TABLE
+rcounts<-table(finaldf$BORODESC)
+rcounts<-data.frame(rcounts)
+rcounts<-rcounts[1:4,]
+names(rcounts)<-c("Borough","Counts")
+rcounts<-rcounts[order(rcounts$Counts,decreasing=TRUE),]
+rcounts
+
+#HISTOGRAM
+rcounts_b<-ggplot(data=finaldf,aes(x=BORODESC)) + geom_bar(stat="bin") +
+                  scale_y_continuous(breaks=c(1000,2000,3000,4000,5000,6000,7000)) +
+                  labs(title="Number of Restaurants by Borough", x = "BOROUGH", y= "COUNTS") +
+                  theme(axis.title.x = element_text(face="bold", colour="#000000", size=18), axis.text.x =element_text(size=16),
+                        axis.title.y = element_text(face="bold", colour="#000000", size=18), axis.text.y =element_text(size=16),
+                        title = element_text(face="bold",size=20),
+                        panel.grid.minor.x =element_blank(), panel.grid.major.x=element_blank())
+
+#Counts of the Cuisines
+#TABLE
+ccounts<-table(finaldf$CODEDESC)
+ccounts<-data.frame(ccounts)
+ccounts
+names(ccounts)<-c("Cuisine Type","Counts")
+ccounts<-ccounts[order(ccounts$Counts,decreasing=TRUE),]
+
+#Top 10 Cuisines in NYC
+c10<-ccounts[1:10,]
+
+#Just choosing the top 10 cuisines to reduce clutter
+b<- subset(finaldf,CODEDESC =="American" 
+           | CODEDESC =="Chinese" 
+           | CODEDESC =="Pizza"
+           | CODEDESC =="Cafe/Coffee/Tea"
+           | CODEDESC =="Italian" 
+           | CODEDESC =="Spanish"
+           | CODEDESC =="Latin (Cuban, Dominican, Puerto Rican, South & Central American)"
+           | CODEDESC =="Japanese"
+           | CODEDESC =="Caribbean" 
+           | CODEDESC =="Mexican")
+
+#Basic Bar of top 10
+ggplot(data=b,aes(x=CODEDESC)) + geom_bar(stat="bin") +
+  coord_flip() +
+  labs(title="Top 10 Cuisine Types", x = "Cuisines", y= "Counts") +
+  theme(axis.title.x = element_text(face="bold", colour="#000000", size=18), axis.text.x =element_text(size=16),
+        axis.title.y = element_text(face="bold", colour="#000000", size=18), axis.text.y =element_text(size=16),
+        title = element_text(face="bold",size=20),
+        panel.grid.minor.x =element_blank(), panel.grid.major.x=element_blank())
+          
+#Plot Denisity of Restaurants by Borough
+ggplot(data=b,aes(x=CODEDESC, y=BORO)) + geom_jitter(stat="identity",alpha =0.5, size=2.2) +
+  labs(title="Grades Density By Borough", x = "Grade", y= "Borough") +
+  theme(axis.title.x = element_text(face="bold", colour="#000000", size=18), axis.text.x =element_text(size=16),
+        axis.title.y = element_text(face="bold", colour="#000000", size=18), axis.text.y =element_text(size=16),
+        title = element_text(face="bold",size=20),
+        panel.grid.minor.x =element_blank(), panel.grid.major.x=element_blank())+
+  scale_y_discrete(labels=c("Manhattan", "Bronx", "Brooklyn", "Queens"))
+
+
+#CREATED POLAR CHARTS FOR EACH BOROUGH 
+
+#Polar for all
+polar <-ggplot(data=b,aes(x=CODEDESC)) + geom_bar(stat="bin") +
+        labs(title="Top 10 Cuisine Types", x = "Cuisines", y= "Counts") +
+        theme(axis.title.x = element_text(face="bold", colour="#000000", size=18), axis.text.x =element_text(size=10),
+            axis.title.y = element_text(face="bold", colour="#000000", size=18), axis.text.y =element_text(size=16),
+            title = element_text(face="bold",size=20),plot.margin=unit(c(1,1,-0.5,1), "cm"))+
+      coord_polar()
+      
+#CLEAN UP THE LOOK
+margin<-c(1,1,-1,1)
+
+#Polar Manhattan
+man <-subset(b,BORO ==1)
+           
+mpolar<-ggplot(data=man,aes(x=CODEDESC,color="")) + geom_bar(stat="bin") +
+        labs(title="Manhattan", x = "Cuisines", y= "Counts") +
+        theme(axis.title.x = element_text(face="bold", colour="#000000", size=18), axis.text.x =element_text(size=10),
+              axis.title.y = element_text(face="bold", colour="#000000", size=18), axis.text.y =element_text(size=16),
+              title = element_text(face="bold",size=20),legend.position="none",plot.margin=unit(c(margin), "cm"))+
+        coord_polar()      
+
+#Bronx
+bx<-subset(b,BORO ==2)
+bxpolar<-ggplot(data=bx,aes(x=CODEDESC,color="")) + geom_bar(stat="bin") +
+  labs(title="Bronx", x = "Cuisines", y= "Counts") +
+  theme(axis.title.x = element_text(face="bold", colour="#000000", size=18), axis.text.x =element_text(size=10),
+        axis.title.y = element_text(face="bold", colour="#000000", size=18), axis.text.y =element_text(size=16),
+        title = element_text(face="bold",size=20),legend.position="none",plot.margin=unit(c(margin), "cm"))+
+  coord_polar()      
+
+#Brooklyn
+bk<-subset(b,BORO ==3)
+bkpolar<-ggplot(data=bk,aes(x=CODEDESC,color="")) + geom_bar(stat="bin") +
+  labs(title="Brooklyn", x = "Cuisines", y= "Counts") +
+  theme(axis.title.x = element_text(face="bold", colour="#000000", size=18), axis.text.x =element_text(size=10),
+        axis.title.y = element_text(face="bold", colour="#000000", size=18), axis.text.y =element_text(size=16),
+        title = element_text(face="bold",size=20),legend.position="none",plot.margin=unit(c(margin), "cm"))+
+  coord_polar()      
+
+#Queens
+qn<-subset(b,BORO ==4)
+qnpolar<-ggplot(data=qn,aes(x=CODEDESC,color="")) + geom_bar(stat="bin") +
+  labs(title="Queens", x = "Cuisines", y= "Counts") +
+  theme(axis.title.x = element_text(face="bold", colour="#000000", size=18), axis.text.x =element_text(size=10),
+        axis.title.y = element_text(face="bold", colour="#000000", size=18), axis.text.y =element_text(size=16),
+        title = element_text(face="bold",size=20),legend.position="none",plot.margin=unit(c(margin), "cm"))+
+  coord_polar()   
+
+#Arrange Them
+grid.arrange(mpolar, bkpolar,qnpolar,bxpolar,ncol=2)
+
+
+#CURRENTGRADE density by Borough
+cg<-subset(finaldf,CURRENTGRADE != "P")
+
+ggplot(data=cg,aes(x=CURRENTGRADE, y=BORO)) + geom_jitter(stat="identity",alpha =0.5, size=2.2) +
+  labs(title="Grades Density By Borough", x = "Grade", y= "Borough") +
+  theme(axis.title.x = element_text(face="bold", colour="#000000", size=18), axis.text.x =element_text(size=16),
+        axis.title.y = element_text(face="bold", colour="#000000", size=18), axis.text.y =element_text(size=16),
+        title = element_text(face="bold",size=20),
+        panel.grid.minor.x =element_blank(), panel.grid.major.x=element_blank())+
+  scale_x_discrete(labels=c("Not Yet Graded", "A", "B", "C", "Grade Pending"))+
+  scale_y_discrete(labels=c("Manhattan", "Bronx", "Brooklyn", "Queens"))
+
+
+#------------------------MAPPING------------------#
+
+
+#---------------SETTING UP THE BASIC MAP -----------------# 
+
+nycmap <- get_map(location = c(left = -74.045448, bottom = 40.544714, right = -73.629591, top = 40.928859),
+                  source= "stamen",      
+                  zoom = 13,
+                  maptype = "toner",
+                  urlonly= FALSE,
+                  filename = "ggmapnyc")
+
+#Changing the color scheme to light blue because the black was too harsh
+cny<-attr(nycmap,"bb")
+nycmap[nycmap == "#000000"] <-"#5DCFC3"
+class(nycmap) <- c("ggmap", "raster")
+attr(nycmap,"bb") <-cny
+#--------------------------------------------------------#
+
+#MAP OF EVERYTHING
+ggmap(nycmap) +
+      geom_point(aes(x=lon, y=lat), data = finaldf, alpha =.5, color = "darkred", size=0.8)
+
+
+#MAPS BY CUISINE
+chinese <- subset(finaldf,CODEDESC == "Chinese")
+ggmap(nycmap)+
+      geom_point(aes(x=lon, y=lat), data = chinese, alpha =.5, color = "darkred", size=1.5)+
+      theme(axis.title.x = element_blank(), axis.text.x =element_blank(),
+            axis.title.y = element_blank(), axis.text.y =element_blank(),
+            title = element_text(face="bold",size=20))+
+      labs(title="Map of Chinese Restaurants")
+
+american <- subset(finaldf,CODEDESC == "American")
+ggmap(nycmap)+
+  geom_point(aes(x=lon, y=lat), data = american, alpha =.5, color = "darkred", size=1.5)+
+  theme(axis.title.x = element_blank(), axis.text.x =element_blank(),
+        axis.title.y = element_blank(), axis.text.y =element_blank(),
+        title = element_text(face="bold",size=20))+
+  labs(title="Map of American Restaurants")
+
+french <- subset(finaldf,CODEDESC == "French")
+ggmap(nycmap)+
+  geom_point(aes(x=lon, y=lat), data = french, alpha =.5, color = "darkred", size=1.5)+
+  theme(axis.title.x = element_blank(), axis.text.x =element_blank(),
+        axis.title.y = element_blank(), axis.text.y =element_blank(),
+        title = element_text(face="bold",size=20))+
+  labs(title="Map of French Restaurants")
+
+korean <- subset(finaldf,CODEDESC == "Korean")
+ggmap(nycmap)+
+  geom_point(aes(x=lon, y=lat), data = korean, alpha =.5, color = "darkred", size=1.5)+
+  theme(axis.title.x = element_blank(), axis.text.x =element_blank(),
+        axis.title.y = element_blank(), axis.text.y =element_blank(),
+        title = element_text(face="bold",size=20))+
+  labs(title="Map of Korean Restaurants")
+
+pizza <- subset(finaldf,CODEDESC == "Pizza")
+ggmap(nycmap)+
+  geom_point(aes(x=lon, y=lat), data = pizza, alpha =.5, color = "darkred", size=1.5)+
+  theme(axis.title.x = element_blank(), axis.text.x =element_blank(),
+        axis.title.y = element_blank(), axis.text.y =element_blank(),
+        title = element_text(face="bold",size=20))+
+  labs(title="Map of Pizza Restaurants")
+
